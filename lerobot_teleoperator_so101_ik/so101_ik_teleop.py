@@ -55,8 +55,16 @@ class So101IkTeleop(Teleoperator):
             )
 
             if q_sol is not None:
+                # JAX arrays are immutable, so we must make a standard numpy copy first
+                q_vis = np.array(q_sol)
+                
+                # --- THE FIX: Inject the gripper value for the visualizer ---
+                # Based on your URDF, the gripper joint is named "6"
+                if "6" in self.urdf_joints:
+                    gripper_idx = self.urdf_joints.index("6")
+                    q_vis[gripper_idx] = gripper_val
                 # Update UI Ghost
-                self.urdf_vis.update_cfg(q_sol)
+                self.urdf_vis.update_cfg(q_vis)
                 
                 # Safely update the latest solution for get_action() to read
                 with self._lock:
@@ -123,14 +131,14 @@ class So101IkTeleop(Teleoperator):
         with self._lock:
             q_sol = self._latest_q_sol
             gripper_val = self._latest_gripper
-            
-        action["gripper"] = gripper_val
 
         if q_sol is not None:
             for u_idx, u_name in enumerate(self.urdf_joints):
                 if u_name in self.ik_joint_mapping:
                     action_key = self.ik_joint_mapping[u_name]
                     action[action_key] = float(q_sol[u_idx])
+            
+        action["gripper"] = gripper_val
                     
         return action
     
