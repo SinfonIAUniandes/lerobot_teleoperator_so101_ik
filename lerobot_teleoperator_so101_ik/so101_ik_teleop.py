@@ -1,4 +1,6 @@
 import numpy as np
+import threading
+import time
 from typing import Any
 from lerobot.teleoperators.teleoperator import Teleoperator
 from .config_so101_ik_teleop import So101IkTeleopConfig
@@ -19,24 +21,60 @@ class So101IkTeleop(Teleoperator):
         self._is_connected = False
         self.viser_server = None
         
-        # Map URDF joint names to LeRobot action keys
+        # Threading mechanisms
+        self._ik_thread = None
+        self._lock = threading.Lock()
+        
+        # State variables protected by the lock
+        self._latest_q_sol = None
+        self._latest_gripper = 0.0
+        
         self.ik_joint_mapping = {
             "1": "shoulder_pan", "2": "shoulder_lift", "3": "elbow_flex",
             "4": "wrist_flex", "5": "wrist_roll"
         }
 
+    def _ik_worker(self):
+        """Background thread that continuously solves IK based on the UI target."""
+        while self._is_connected:
+            # Read UI state safely
+            try:
+                target_pos = np.array(self.ik_web_target.position)
+                target_quat = np.array(self.ik_web_target.wxyz)
+                gripper_val = self.gripper_slider.value
+            except Exception:
+                # Catch errors if UI is closing
+                break
+
+            # Solve IK (this blocks the worker thread, but not the main loop)
+            q_sol = solve_ik(
+                robot=self.robot,
+                target_link_name=self.config.target_link,
+                target_position=target_pos,
+                target_wxyz=target_quat,
+            )
+
+            if q_sol is not None:
+                # Update UI Ghost
+                self.urdf_vis.update_cfg(q_sol)
+                
+                # Safely update the latest solution for get_action() to read
+                with self._lock:
+                    self._latest_q_sol = q_sol
+                    self._latest_gripper = gripper_val
+
+            # Prevent CPU pegging
+            time.sleep(0.01)
+
     def connect(self) -> None:
-        # 1. Initialize Pyroki Robot for IK
         self.urdf = load_robot_description(self.config.urdf_name)
         self.robot = pk.Robot.from_urdf(self.urdf)
         self.urdf_joints = [j.name for j in self.urdf.actuated_joints]
         
-        # 2. Start Viser Web Server
         self.viser_server = viser.ViserServer(port=self.config.viser_port)
         self.viser_server.scene.add_grid("/ground", width=2, height=2)
         self.urdf_vis = ViserUrdf(self.viser_server, self.urdf, root_node_name="/ghost_robot")
         
-        # 3. Add UI Controls
         self.ik_web_target = self.viser_server.scene.add_transform_controls(
             "/ik_target", scale=0.1, position=(0.3, 0.0, 0.2), wxyz=(1.0, 0.0, 0.0, 0.0)
         )
@@ -44,41 +82,51 @@ class So101IkTeleop(Teleoperator):
             "Gripper", min=0.0, max=1.0, step=0.01, initial_value=0.0
         )
         
+        # --- THE FIX: JAX Warm-up ---
+        print("\n--- Compiling JAX IK Solver ---")
+        print("This will take ~10-20 seconds. Please wait...")
+        dummy_pos = np.array([0.3, 0.0, 0.2])
+        dummy_quat = np.array([1.0, 0.0, 0.0, 0.0])
+        solve_ik(
+            robot=self.robot,
+            target_link_name=self.config.target_link,
+            target_position=dummy_pos,
+            target_wxyz=dummy_quat,
+        )
+        print("--- JAX Compilation Complete! ---\n")
+
         self._is_connected = True
 
+        # Start the background solver thread
+        self._ik_thread = threading.Thread(target=self._ik_worker, daemon=True)
+        self._ik_thread.start()
+
     def disconnect(self) -> None:
+        self._is_connected = False
         if self.viser_server:
             self.viser_server.stop()
-        self._is_connected = False
+        if self._ik_thread:
+            self._ik_thread.join(timeout=1.0)
 
     @property
     def is_connected(self) -> bool:
         return self._is_connected
 
     def get_action(self) -> dict[str, Any]:
-        """Reads UI, solves IK, and returns joint commands."""
-        target_pos = np.array(self.ik_web_target.position)
-        target_quat = np.array(self.ik_web_target.wxyz)
-        
-        # Solve IK
-        q_sol = solve_ik(
-            robot=self.robot,
-            target_link_name=self.config.target_link,
-            target_position=target_pos,
-            target_wxyz=target_quat,
-        )
-        
-        # Initialize default action dictionary
+        """Instantly returns the latest solved joint commands."""
         action = {
             "shoulder_pan": 0.0, "shoulder_lift": 0.0, "elbow_flex": 0.0,
-            "wrist_flex": 0.0, "wrist_roll": 0.0, "gripper": self.gripper_slider.value
+            "wrist_flex": 0.0, "wrist_roll": 0.0, "gripper": 0.0
         }
         
-        if q_sol is not None:
-            # Update ghost robot in Viser UI
-            self.urdf_vis.update_cfg(q_sol)
+        # Safely grab the latest solution without blocking
+        with self._lock:
+            q_sol = self._latest_q_sol
+            gripper_val = self._latest_gripper
             
-            # Map solver output to action dictionary
+        action["gripper"] = gripper_val
+
+        if q_sol is not None:
             for u_idx, u_name in enumerate(self.urdf_joints):
                 if u_name in self.ik_joint_mapping:
                     action_key = self.ik_joint_mapping[u_name]
@@ -88,35 +136,24 @@ class So101IkTeleop(Teleoperator):
     
     @property
     def action_features(self) -> dict:
-        # Define the structure of the commands your teleoperator sends
-        # This matches the names of the actuators in your MuJoCo XML
         return {
-            "shoulder_pan": float,
-            "shoulder_lift": float,
-            "elbow_flex": float,
-            "wrist_flex": float,
-            "wrist_roll": float,
-            "gripper": float,
+            "shoulder_pan": float, "shoulder_lift": float, "elbow_flex": float,
+            "wrist_flex": float, "wrist_roll": float, "gripper": float,
         }
 
     @property
     def feedback_features(self) -> dict:
-        # The web UI doesn't take force-feedback data back from the robot
         return {}
 
     @property
     def is_calibrated(self) -> bool:
-        # Software UIs don't need physical calibration
         return True
 
     def calibrate(self) -> None:
-        # No-op for software UI
         pass
 
     def configure(self) -> None:
-        # No-op for software UI
         pass
 
     def send_feedback(self, feedback: dict[str, Any]) -> None:
-        # A web UI doesn't have force feedback, so this is a no-op
         pass
