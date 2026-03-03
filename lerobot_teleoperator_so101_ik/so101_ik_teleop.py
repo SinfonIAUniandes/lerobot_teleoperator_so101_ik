@@ -28,6 +28,8 @@ class So101IkTeleop(Teleoperator):
         # State variables protected by the lock
         self._latest_q_sol = None
         self._latest_gripper = 0.0
+
+        self.scale = 50.0  # Scale factor for the robot arm joint angles
         
         self.ik_joint_mapping = {
             "1": "shoulder_pan", "2": "shoulder_lift", "3": "elbow_flex",
@@ -84,7 +86,11 @@ class So101IkTeleop(Teleoperator):
         self.urdf_vis = ViserUrdf(self.viser_server, self.urdf, root_node_name="/ghost_robot")
         
         self.ik_web_target = self.viser_server.scene.add_transform_controls(
-            "/ik_target", scale=0.1, position=(0.3, 0.0, 0.2), wxyz=(1.0, 0.0, 0.0, 0.0)
+            "/ik_target", 
+            scale=0.1, 
+            # Updated to your safe starting position
+            position=(0.00931305, -0.27034248, 0.26730747), 
+            wxyz=(0.707, -0.707, 0.0, 0.0)
         )
         self.gripper_slider = self.viser_server.gui.add_slider(
             "Gripper", min=0.0, max=1.0, step=0.01, initial_value=0.0
@@ -94,7 +100,7 @@ class So101IkTeleop(Teleoperator):
         print("\n--- Compiling JAX IK Solver ---")
         print("This will take ~10-20 seconds. Please wait...")
         dummy_pos = np.array([0.3, 0.0, 0.2])
-        dummy_quat = np.array([1.0, 0.0, 0.0, 0.0])
+        dummy_quat = np.array([0.0, 0.0, 0.0, 0.0])
         solve_ik(
             robot=self.robot,
             target_link_name=self.config.target_link,
@@ -120,33 +126,39 @@ class So101IkTeleop(Teleoperator):
     def is_connected(self) -> bool:
         return self._is_connected
 
-    def get_action(self) -> dict[str, Any]:
-        """Instantly returns the latest solved joint commands."""
-        action = {
-            "shoulder_pan": 0.0, "shoulder_lift": 0.0, "elbow_flex": 0.0,
-            "wrist_flex": 0.0, "wrist_roll": 0.0, "gripper": 0.0
-        }
-        
-        # Safely grab the latest solution without blocking
+    def get_action(self) -> dict:
+        """Returns joint commands in Radians, which the robot driver handles."""
         with self._lock:
             q_sol = self._latest_q_sol
             gripper_val = self._latest_gripper
 
+        # We use 0.0 as the base (the robot's calibrated center)
+        action_dict = {
+            "shoulder_pan.pos": 0.0,
+            "shoulder_lift.pos": 0.0,
+            "elbow_flex.pos": 0.0,
+            "wrist_flex.pos": 0.0,
+            "wrist_roll.pos": 0.0,
+            "gripper.pos": float(gripper_val) * self.scale,  # Scale gripper value to match expected range,
+        }
+
         if q_sol is not None:
-            for u_idx, u_name in enumerate(self.urdf_joints):
-                if u_name in self.ik_joint_mapping:
-                    action_key = self.ik_joint_mapping[u_name]
-                    action[action_key] = float(q_sol[u_idx])
+            # Map the IK solution URDF indices to the .pos string keys
+            # These values are in Radians.
+            if "1" in self.urdf_joints: action_dict["shoulder_pan.pos"] = float(q_sol[self.urdf_joints.index("1")]) * self.scale
+            if "2" in self.urdf_joints: action_dict["shoulder_lift.pos"] = float(q_sol[self.urdf_joints.index("2")]) * self.scale
+            if "3" in self.urdf_joints: action_dict["elbow_flex.pos"] = float(q_sol[self.urdf_joints.index("3")])  * self.scale
+            if "4" in self.urdf_joints: action_dict["wrist_flex.pos"] = float(q_sol[self.urdf_joints.index("4")]) * self.scale
+            if "5" in self.urdf_joints: action_dict["wrist_roll.pos"] = float(q_sol[self.urdf_joints.index("5")]) * self.scale
             
-        action["gripper"] = gripper_val
-                    
-        return action
+        return action_dict
     
     @property
     def action_features(self) -> dict:
+        # Register the features with the exact .pos suffix the pipeline expects
         return {
-            "shoulder_pan": float, "shoulder_lift": float, "elbow_flex": float,
-            "wrist_flex": float, "wrist_roll": float, "gripper": float,
+            "shoulder_pan.pos": float, "shoulder_lift.pos": float, "elbow_flex.pos": float,
+            "wrist_flex.pos": float, "wrist_roll.pos": float, "gripper.pos": float,
         }
 
     @property
