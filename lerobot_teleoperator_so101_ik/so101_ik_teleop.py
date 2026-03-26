@@ -122,6 +122,16 @@ class So101IkTeleop(Teleoperator):
         if self._ik_thread:
             self._ik_thread.join(timeout=1.0)
 
+    def reset_target(self) -> None:
+        """Snaps the Viser IK target and gripper back to their starting safe coordinates."""
+        if hasattr(self, 'ik_web_target'):
+            # These are the safe starting coordinates defined in your connect() method
+            self.ik_web_target.position = (0.00931305, -0.27034248, 0.26730747)
+            self.ik_web_target.wxyz = (0.707, -0.707, 0.0, 0.0)
+            
+        if hasattr(self, 'gripper_slider'):
+            self.gripper_slider.value = 0.0
+
     @property
     def is_connected(self) -> bool:
         return self._is_connected
