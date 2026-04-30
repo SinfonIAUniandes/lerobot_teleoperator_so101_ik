@@ -1,4 +1,6 @@
 # SO101 Inverse Kinematics Web Teleoperator
+<img width="709" height="325" alt="image" src="https://github.com/user-attachments/assets/83e4ac9d-454e-4fda-a746-84832d745ca1" />
+
 
 A custom teleoperation plugin for the [LeRobot](https://github.com/huggingface/lerobot) framework. This package spins up a local Viser web server with a 3D interface, allowing you to control a robotic arm using a drag-and-drop target gizmo. 
 
