@@ -1,2 +1,3 @@
 from .config_so101_ik_teleop import So101IkTeleopConfig
 from .so101_ik_teleop import So101IkTeleop
+from .so101physicalwrapper import So101PhysicalWrapper
